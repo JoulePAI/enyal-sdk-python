@@ -35,7 +35,7 @@ from local_knowledge import LocalKnowledgeGraph
 
 # Import the existing ENYAL client functions
 from importlib.util import spec_from_file_location, module_from_spec
-_client_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "enyal-client.py")
+_client_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "enyal_client.py")
 _spec = spec_from_file_location("enyal_client", _client_path)
 _client = module_from_spec(_spec)
 _spec.loader.exec_module(_client)
@@ -136,8 +136,13 @@ class EnyalAgent:
     # === PERMANENT PROOF (costs joules) ===
 
     def archive(self, chunk_type, chunk_key, data,
-                agent_id=None):
-        """Archive to ENYAL. Permanent. Encrypted. Provable."""
+                agent_id=None, idempotency_key=None, retry=True):
+        """Archive to ENYAL. Permanent. Encrypted. Provable.
+
+        Args:
+            idempotency_key: Key for safe retries. Auto-generated if omitted.
+            retry: Set False to disable automatic retries.
+        """
         result = archive(
             self.api_key,
             agent_id=agent_id or "sdk-agent",
@@ -145,6 +150,8 @@ class EnyalAgent:
             chunk_key=chunk_key,
             data=data,
             base_url=self.base_url,
+            idempotency_key=idempotency_key,
+            retry=retry,
         )
 
         name = data.get("name") or data.get("decision") or chunk_key
@@ -157,27 +164,48 @@ class EnyalAgent:
 
         return result
 
-    def prove(self, resource_type, **kwargs):
-        """Generate ZK proof."""
-        return prove(self.api_key, resource_type, base_url=self.base_url, **kwargs)
+    def prove(self, resource_type, idempotency_key=None, retry=True, **kwargs):
+        """Generate ZK proof.
 
-    def disclose(self, chunk_ids, recipient_pubkey, purpose):
-        """Selective disclosure."""
+        Args:
+            idempotency_key: Key for safe retries. Auto-generated if omitted.
+            retry: Set False to disable automatic retries.
+        """
+        return prove(self.api_key, resource_type, base_url=self.base_url,
+                     idempotency_key=idempotency_key, retry=retry, **kwargs)
+
+    def disclose(self, chunk_ids, recipient_pubkey, purpose,
+                 idempotency_key=None, retry=True):
+        """Selective disclosure.
+
+        Args:
+            idempotency_key: Key for safe retries. Auto-generated if omitted.
+            retry: Set False to disable automatic retries.
+        """
         return disclose(
             self.api_key, chunk_ids,
             recipient_pubkey, purpose,
             base_url=self.base_url,
+            idempotency_key=idempotency_key,
+            retry=retry,
         )
 
     # === MESSAGING ===
 
     def send(self, sender_id, thread_id, recipient_id,
-             message_type, payload):
-        """Send agent message via ENYAL."""
+             message_type, payload, idempotency_key=None, retry=True):
+        """Send agent message via ENYAL.
+
+        Args:
+            idempotency_key: Key for safe retries. Auto-generated if omitted.
+            retry: Set False to disable automatic retries.
+        """
         return send_message(
             self.api_key, sender_id, thread_id,
             recipient_id, message_type, payload,
             base_url=self.base_url,
+            idempotency_key=idempotency_key,
+            retry=retry,
         )
 
     def inbox(self, agent_id, **kwargs):
