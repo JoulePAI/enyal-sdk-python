@@ -17,9 +17,15 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
+import random
 import struct
+import time
 import urllib.request
+import uuid
 from typing import Optional
+
+logger = logging.getLogger("enyal_sdk")
 
 # ────────────────────────────────────────────────────────────────
 # GF(256) Arithmetic — identical to enyal/shamir.py
@@ -148,24 +154,21 @@ def request_client_disclosure(
     base_url: str,
     chunk_ids: list[str],
     purpose: str,
+    idempotency_key: str = None,
+    retry: bool = True,
 ) -> dict:
     """1. Request client-side disclosure materials from ENYAL.
 
     Returns encrypted chunks + ECDH-encrypted custodial share + poseidon_key_hash.
     No decryption on server. Customer share is NOT sent.
+
+    Args:
+        idempotency_key: Key for safe retries. Auto-generated if omitted.
+        retry: Set False to disable automatic retries.
     """
-    body = json.dumps({"chunk_ids": chunk_ids, "purpose": purpose}).encode()
-    req = urllib.request.Request(
-        f"{base_url}/api/v1/disclose/client-side",
-        data=body,
-        headers={"Content-Type": "application/json", "X-API-Key": api_key},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        detail = json.loads(e.read()).get("detail", str(e)) if e.fp else str(e)
-        raise RuntimeError(f"Disclosure failed ({e.code}): {detail}")
+    return _api_call(api_key, "POST", "/api/v1/disclose/client-side",
+                     {"chunk_ids": chunk_ids, "purpose": purpose}, base_url=base_url,
+                     idempotency_key=idempotency_key, retry=retry)
 
 
 def decrypt_custodial_share(
@@ -292,6 +295,8 @@ def request_share_proof(
     base_url: str,
     customer_share_hex: str,
     poseidon_key_hash: Optional[str] = None,
+    idempotency_key: str = None,
+    retry: bool = True,
 ) -> dict:
     """5. Request a cryptographic share combination proof from ENYAL (Tier 2).
 
@@ -309,19 +314,9 @@ def request_share_proof(
     body_dict = {"customer_share_hex": customer_share_hex}
     if poseidon_key_hash:
         body_dict["poseidon_key_hash"] = poseidon_key_hash
-    body = json.dumps(body_dict).encode()
-
-    req = urllib.request.Request(
-        f"{base_url}/api/v1/prove/share-combination",
-        data=body,
-        headers={"Content-Type": "application/json", "X-API-Key": api_key},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        detail = json.loads(e.read()).get("detail", str(e)) if e.fp else str(e)
-        raise RuntimeError(f"Proof generation failed ({e.code}): {detail}")
+    return _api_call(api_key, "POST", "/api/v1/prove/share-combination",
+                     body_dict, base_url=base_url, timeout=120,
+                     idempotency_key=idempotency_key, retry=retry)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -330,30 +325,136 @@ def request_share_proof(
 
 DEFAULT_BASE_URL = "https://api.enyal.ai"
 
+# ────────────────────────────────────────────────────────────────
+# Retry + Idempotency Infrastructure
+# ────────────────────────────────────────────────────────────────
+
+# Maps API path → (server-side field name, placement).
+# Pattern A endpoints use client_chunk_id / client_attestation_id.
+# Pattern B endpoints use idempotency_key.
+_IDEMPOTENCY_MAP = {
+    "/api/v1/archive":               ("client_chunk_id", "body"),
+    "/api/v1/timestamp":             ("client_chunk_id", "body"),
+    "/api/v1/agreement/create":      ("client_chunk_id", "body"),
+    "/api/v1/compliance/attest":     ("client_attestation_id", "body"),
+    "/api/v1/prove":                 ("idempotency_key", "body"),
+    "/api/v1/prove-batch":           ("idempotency_key", "body"),
+    "/api/v1/prove/share-combination": ("idempotency_key", "body"),
+    "/api/v1/disclose":              ("idempotency_key", "body"),
+    "/api/v1/disclose/client-side":  ("idempotency_key", "body"),
+    "/api/v1/message/send":          ("idempotency_key", "body"),
+}
+
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_INITIAL_DELAY = 0.5
+DEFAULT_MAX_DELAY = 8.0
+DEFAULT_BACKOFF_FACTOR = 2
+DEFAULT_JITTER_MIN = 0.1
+DEFAULT_JITTER_MAX = 0.3
+
+
+def _is_retryable_error(exc) -> bool:
+    """Return True if the error is retryable (network, timeout, 5xx, 429)."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 429 or exc.code >= 500
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, OSError, ConnectionError)):
+        return True
+    return False
+
+
+def _get_retry_after(exc) -> float | None:
+    """Extract Retry-After header value from a 429 response, if present."""
+    if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+        val = exc.headers.get("Retry-After") if exc.headers else None
+        if val:
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                pass
+    return None
+
 
 def _api_call(api_key: str, method: str, path: str, body: dict = None,
-              params: dict = None, base_url: str = DEFAULT_BASE_URL, timeout: int = 30) -> dict:
-    """Generic API call helper. Returns parsed JSON response."""
+              params: dict = None, base_url: str = DEFAULT_BASE_URL, timeout: int = 30,
+              idempotency_key: str = None, retry: bool = True,
+              max_retries: int = DEFAULT_MAX_RETRIES) -> dict:
+    """Generic API call helper with retry + idempotency. Returns parsed JSON response.
+
+    Args:
+        idempotency_key: Key for safe retries. SDK generates UUID4 if omitted.
+            Translated to the correct server-side field per endpoint.
+        retry: If False, no retries (single attempt). Default True.
+        max_retries: Maximum retry attempts (default 3).
+    """
+    # Resolve idempotency key for this call invocation (stable across retries)
+    idem_mapping = _IDEMPOTENCY_MAP.get(path)
+    if idem_mapping and method == "POST":
+        server_field, placement = idem_mapping
+        resolved_key = idempotency_key or str(uuid.uuid4())
+        if placement == "body":
+            if body is None:
+                body = {}
+            body[server_field] = resolved_key
+
     url = f"{base_url}{path}"
     if params:
         qs = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v is not None)
         url = f"{url}?{qs}"
-    data = json.dumps(body).encode() if body else None
-    headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        detail = json.loads(e.read()).get("detail", str(e)) if e.fp else str(e)
-        raise RuntimeError(f"API call failed ({e.code}): {detail}")
+
+    attempts = (max_retries + 1) if retry else 1
+    last_exc = None
+
+    for attempt in range(1, attempts + 1):
+        data = json.dumps(body).encode() if body else None
+        headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                result = json.loads(resp.read())
+                if attempt > 1:
+                    logger.info("Succeeded on attempt %d: %s %s", attempt, method, path)
+                return result
+        except Exception as exc:
+            last_exc = exc
+            if not retry or attempt == attempts or not _is_retryable_error(exc):
+                break
+
+            # Calculate delay with exponential backoff + jitter
+            retry_after = _get_retry_after(exc)
+            if retry_after is not None:
+                delay = min(retry_after, DEFAULT_MAX_DELAY)
+            else:
+                delay = min(DEFAULT_INITIAL_DELAY * (DEFAULT_BACKOFF_FACTOR ** (attempt - 1)),
+                            DEFAULT_MAX_DELAY)
+            delay += random.uniform(DEFAULT_JITTER_MIN, DEFAULT_JITTER_MAX)
+
+            status = getattr(exc, 'code', None) or type(exc).__name__
+            logger.info("Retry %d/%d for %s %s (reason: %s, delay: %.1fs)",
+                        attempt, max_retries, method, path, status, delay)
+            time.sleep(delay)
+
+    # Final failure — raise with context
+    if isinstance(last_exc, urllib.error.HTTPError):
+        try:
+            detail = json.loads(last_exc.read()).get("detail", str(last_exc))
+        except Exception:
+            detail = str(last_exc)
+        raise RuntimeError(f"API call failed ({last_exc.code}): {detail}")
+    raise RuntimeError(f"API call failed: {last_exc}") from last_exc
 
 
 def archive(api_key: str, agent_id: str, chunk_type: str, chunk_key: str,
-            data, base_url: str = DEFAULT_BASE_URL, **metadata) -> dict:
-    """Archive to ENYAL's immutable ledger. Returns {chunk_id, status, joule_cost}."""
+            data, base_url: str = DEFAULT_BASE_URL, idempotency_key: str = None,
+            retry: bool = True, **metadata) -> dict:
+    """Archive to ENYAL's immutable ledger. Returns {chunk_id, status, joule_cost}.
+
+    Args:
+        idempotency_key: Key for safe retries. Auto-generated if omitted.
+        retry: Set False to disable automatic retries.
+    """
     body = {"agent_id": agent_id, "chunk_type": chunk_type, "chunk_key": chunk_key, "data": data, **metadata}
-    return _api_call(api_key, "POST", "/api/v1/archive", body, base_url=base_url)
+    return _api_call(api_key, "POST", "/api/v1/archive", body, base_url=base_url,
+                     idempotency_key=idempotency_key, retry=retry)
 
 
 def search(api_key: str, query: str = None, chunk_type: str = None, entity: str = None,
@@ -366,22 +467,36 @@ def search(api_key: str, query: str = None, chunk_type: str = None, entity: str 
 
 
 def prove(api_key: str, resource_type: str, geographic_region: str = None,
-          quantum_resistant: bool = False, base_url: str = DEFAULT_BASE_URL) -> dict:
-    """Generate a ZK proof of archived intelligence. Returns proof + metadata."""
+          quantum_resistant: bool = False, base_url: str = DEFAULT_BASE_URL,
+          idempotency_key: str = None, retry: bool = True) -> dict:
+    """Generate a ZK proof of archived intelligence. Returns proof + metadata.
+
+    Args:
+        idempotency_key: Key for safe retries. Auto-generated if omitted.
+        retry: Set False to disable automatic retries.
+    """
     body = {"resource_type": resource_type, "quantum_resistant": quantum_resistant}
     if geographic_region:
         body["geographic_region"] = geographic_region
-    return _api_call(api_key, "POST", "/api/v1/prove", body, base_url=base_url, timeout=60)
+    return _api_call(api_key, "POST", "/api/v1/prove", body, base_url=base_url, timeout=60,
+                     idempotency_key=idempotency_key, retry=retry)
 
 
 def disclose(api_key: str, chunk_ids: list, recipient_pubkey_hex: str, purpose: str,
              include_content_proof: bool = False, proof_hash_type: str = "poseidon",
-             base_url: str = DEFAULT_BASE_URL) -> dict:
-    """Server-side disclosure — re-encrypts chunks for a recipient."""
+             base_url: str = DEFAULT_BASE_URL, idempotency_key: str = None,
+             retry: bool = True) -> dict:
+    """Server-side disclosure — re-encrypts chunks for a recipient.
+
+    Args:
+        idempotency_key: Key for safe retries. Auto-generated if omitted.
+        retry: Set False to disable automatic retries.
+    """
     body = {"chunk_ids": chunk_ids, "recipient_pubkey_hex": recipient_pubkey_hex,
             "purpose": purpose, "include_content_proof": include_content_proof,
             "proof_hash_type": proof_hash_type}
-    return _api_call(api_key, "POST", "/api/v1/disclose", body, base_url=base_url, timeout=60)
+    return _api_call(api_key, "POST", "/api/v1/disclose", body, base_url=base_url, timeout=60,
+                     idempotency_key=idempotency_key, retry=retry)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -389,21 +504,35 @@ def disclose(api_key: str, chunk_ids: list, recipient_pubkey_hex: str, purpose: 
 # ────────────────────────────────────────────────────────────────
 
 def timestamp(api_key: str, payload, description: str = None,
-              base_url: str = DEFAULT_BASE_URL) -> dict:
-    """Timestamp anchored to ENYAL's immutable ledger. Returns {chunk_id, transaction_id}."""
+              base_url: str = DEFAULT_BASE_URL, idempotency_key: str = None,
+              retry: bool = True) -> dict:
+    """Timestamp anchored to ENYAL's immutable ledger. Returns {chunk_id, transaction_id}.
+
+    Args:
+        idempotency_key: Key for safe retries. Auto-generated if omitted.
+        retry: Set False to disable automatic retries.
+    """
     body = {"payload": payload}
     if description:
         body["description"] = description
-    return _api_call(api_key, "POST", "/api/v1/timestamp", body, base_url=base_url)
+    return _api_call(api_key, "POST", "/api/v1/timestamp", body, base_url=base_url,
+                     idempotency_key=idempotency_key, retry=retry)
 
 
 def create_agreement(api_key: str, terms: str, parties: list, title: str = None,
-                     base_url: str = DEFAULT_BASE_URL) -> dict:
-    """Create a multi-party agreement anchored to ENYAL's immutable ledger."""
+                     base_url: str = DEFAULT_BASE_URL, idempotency_key: str = None,
+                     retry: bool = True) -> dict:
+    """Create a multi-party agreement anchored to ENYAL's immutable ledger.
+
+    Args:
+        idempotency_key: Key for safe retries. Auto-generated if omitted.
+        retry: Set False to disable automatic retries.
+    """
     body = {"terms": terms, "parties": parties}
     if title:
         body["title"] = title
-    return _api_call(api_key, "POST", "/api/v1/agreement/create", body, base_url=base_url)
+    return _api_call(api_key, "POST", "/api/v1/agreement/create", body, base_url=base_url,
+                     idempotency_key=idempotency_key, retry=retry)
 
 
 def verify_agreement(api_key: str, agreement_chunk_id: str, terms: str,
@@ -419,11 +548,17 @@ def get_lineage(api_key: str, chunk_id: str, base_url: str = DEFAULT_BASE_URL) -
 
 
 def compliance_attest(api_key: str, period_start: str, period_end: str, systems: list,
-                      base_url: str = DEFAULT_BASE_URL) -> dict:
-    """Generate a compliance attestation report. Returns {attestation_id, tx_id}."""
+                      base_url: str = DEFAULT_BASE_URL, idempotency_key: str = None,
+                      retry: bool = True) -> dict:
+    """Generate a compliance attestation report. Returns {attestation_id, tx_id}.
+
+    Args:
+        idempotency_key: Key for safe retries. Auto-generated if omitted.
+        retry: Set False to disable automatic retries.
+    """
     return _api_call(api_key, "POST", "/api/v1/compliance/attest",
                      {"period_start": period_start, "period_end": period_end, "systems": systems},
-                     base_url=base_url)
+                     base_url=base_url, idempotency_key=idempotency_key, retry=retry)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -432,14 +567,21 @@ def compliance_attest(api_key: str, period_start: str, period_end: str, systems:
 
 def send_message(api_key: str, sender_agent_id: str, thread_id: str,
                  recipient_agent_id: str, message_type: str, payload: dict,
-                 expires_at: str = None, base_url: str = DEFAULT_BASE_URL) -> dict:
-    """Send an agent-to-agent message. Cost: 10 joules."""
+                 expires_at: str = None, base_url: str = DEFAULT_BASE_URL,
+                 idempotency_key: str = None, retry: bool = True) -> dict:
+    """Send an agent-to-agent message. Cost: 10 joules.
+
+    Args:
+        idempotency_key: Key for safe retries. Auto-generated if omitted.
+        retry: Set False to disable automatic retries.
+    """
     body = {"sender_agent_id": sender_agent_id, "thread_id": thread_id,
             "recipient_agent_id": recipient_agent_id, "message_type": message_type,
             "payload": payload}
     if expires_at:
         body["expires_at"] = expires_at
-    return _api_call(api_key, "POST", "/api/v1/message/send", body, base_url=base_url)
+    return _api_call(api_key, "POST", "/api/v1/message/send", body, base_url=base_url,
+                     idempotency_key=idempotency_key, retry=retry)
 
 
 def get_inbox(api_key: str, agent_id: str, direction: str = "inbox",
@@ -542,17 +684,22 @@ def get_knowledge_health(api_key: str,
 
 
 def synthesise_knowledge(api_key: str, query: str, node_ids: list,
-                         base_url: str = DEFAULT_BASE_URL) -> dict:
+                         base_url: str = DEFAULT_BASE_URL, **kwargs) -> dict:
     """Combine multiple knowledge nodes into a synthesis. Cost: 5 joules.
 
     Creates a new 'synthesis' node with 'informed_by' edges to each source.
+
+    NOTE: This endpoint requires password-session auth (web console / mobile app).
+    It cannot be called via API key. Use the ENYAL web console at enyal.ai instead.
 
     Args:
         query: synthesis question (max 500 chars)
         node_ids: list of 1-20 node UUIDs to synthesise
 
-    Returns:
-        {id, name, node_type, summary, source_nodes, edges_created, cost}
+    Raises:
+        RuntimeError: Always — this endpoint is not available via API key auth.
     """
-    return _api_call(api_key, "POST", "/api/v1/knowledge/synthesise",
-                     {"query": query, "node_ids": node_ids}, base_url=base_url)
+    raise RuntimeError(
+        "knowledge/synthesise requires session auth (not API key). "
+        "Use the ENYAL web console at enyal.ai or the mobile app."
+    )
