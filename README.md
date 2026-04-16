@@ -5,7 +5,7 @@ Your agent thinks locally. ENYAL proves permanently.
 ## Quick Start — Local Knowledge + Permanent Proof
 
 ```python
-from enyal_agent import EnyalAgent
+from enyal_sdk import EnyalAgent
 
 agent = EnyalAgent(api_key="eyl_your_key")
 
@@ -131,7 +131,7 @@ agent.close();
 ## Backup & Restore
 
 ```python
-from enyal_agent import EnyalAgent
+from enyal_sdk import EnyalAgent
 
 agent = EnyalAgent(api_key="eyl_your_key")
 agent.remember("Tesla", "entity", "100GWh capacity", {"sector": "energy"})
@@ -209,7 +209,7 @@ console.log(verification.valid); // true — verified locally, ENYAL never saw y
 ```
 
 ```python
-from enyal_client import request_client_disclosure, decrypt_custodial_share, combine_shares_and_decrypt, verify_share_combination
+from enyal_sdk import request_client_disclosure, decrypt_custodial_share, combine_shares_and_decrypt, verify_share_combination
 
 # 1. Request disclosure materials
 materials = request_client_disclosure(api_key, 'https://api.enyal.ai', ['chunk-id'], 'audit')
@@ -280,7 +280,7 @@ console.log(bytesToHex(secret));
 
 **Python verification:**
 ```python
-from enyal_client import shamir_combine
+from enyal_sdk import shamir_combine
 
 share1 = bytes.fromhex('010712cc64a718cdf5517aa4a7540d943eee4148c6a308d3147509e70e361e3672')
 share2 = bytes.fromhex('020d2286c45a3a88e9b9ea4e41bf08224cf4b4a5ab622a8400c13cf8384b1e4d84')
@@ -324,7 +324,7 @@ await markRead(apiKey, { messageIds: [inbox.messages[0].message_id] });
 
 **Python:**
 ```python
-from enyal_client import send_message, get_inbox, get_thread, mark_read
+from enyal_sdk import send_message, get_inbox, get_thread, mark_read
 
 # Send a trade offer
 msg = send_message(api_key, 'agent-alpha',

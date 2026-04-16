@@ -25,37 +25,10 @@ import hashlib
 import json
 import os
 import shutil
-import sys
 import time
 
-# Allow importing from same directory
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from local_knowledge import LocalKnowledgeGraph
-
-# Import the existing ENYAL client functions
-from importlib.util import spec_from_file_location, module_from_spec
-_client_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "enyal_client.py")
-_spec = spec_from_file_location("enyal_client", _client_path)
-_client = module_from_spec(_spec)
-_spec.loader.exec_module(_client)
-
-archive = _client.archive
-search = _client.search
-prove = _client.prove
-disclose = _client.disclose
-send_message = _client.send_message
-get_inbox = _client.get_inbox
-get_thread = _client.get_thread
-mark_read = _client.mark_read
-get_knowledge_nodes = _client.get_knowledge_nodes
-get_knowledge_node = _client.get_knowledge_node
-get_knowledge_connections = _client.get_knowledge_connections
-get_contradictions = _client.get_contradictions
-get_knowledge_stats = _client.get_knowledge_stats
-get_knowledge_index = _client.get_knowledge_index
-get_knowledge_health = _client.get_knowledge_health
-synthesise_knowledge = _client.synthesise_knowledge
+from .local_knowledge import LocalKnowledgeGraph
+from . import client as _client
 
 MAX_SYNC_PAGES = 50
 
@@ -143,7 +116,7 @@ class EnyalAgent:
             idempotency_key: Key for safe retries. Auto-generated if omitted.
             retry: Set False to disable automatic retries.
         """
-        result = archive(
+        result = _client.archive(
             self.api_key,
             agent_id=agent_id or "sdk-agent",
             chunk_type=chunk_type,
@@ -171,7 +144,7 @@ class EnyalAgent:
             idempotency_key: Key for safe retries. Auto-generated if omitted.
             retry: Set False to disable automatic retries.
         """
-        return prove(self.api_key, resource_type, base_url=self.base_url,
+        return _client.prove(self.api_key, resource_type, base_url=self.base_url,
                      idempotency_key=idempotency_key, retry=retry, **kwargs)
 
     def disclose(self, chunk_ids, recipient_pubkey, purpose,
@@ -182,7 +155,7 @@ class EnyalAgent:
             idempotency_key: Key for safe retries. Auto-generated if omitted.
             retry: Set False to disable automatic retries.
         """
-        return disclose(
+        return _client.disclose(
             self.api_key, chunk_ids,
             recipient_pubkey, purpose,
             base_url=self.base_url,
@@ -200,7 +173,7 @@ class EnyalAgent:
             idempotency_key: Key for safe retries. Auto-generated if omitted.
             retry: Set False to disable automatic retries.
         """
-        return send_message(
+        return _client.send_message(
             self.api_key, sender_id, thread_id,
             recipient_id, message_type, payload,
             base_url=self.base_url,
@@ -210,7 +183,7 @@ class EnyalAgent:
 
     def inbox(self, agent_id, **kwargs):
         """Get messages."""
-        return get_inbox(self.api_key, agent_id, base_url=self.base_url, **kwargs)
+        return _client.get_inbox(self.api_key, agent_id, base_url=self.base_url, **kwargs)
 
     # === SYNC ===
 
@@ -284,7 +257,7 @@ class EnyalAgent:
         ciphertext = aesgcm.encrypt(iv, plaintext, None)
         encrypted_blob = base64.b64encode(iv + ciphertext).decode()
 
-        result = archive(
+        result = _client.archive(
             self.api_key,
             agent_id="sdk-sync",
             chunk_type="knowledge_graph_snapshot",
@@ -327,7 +300,7 @@ class EnyalAgent:
             raise ValueError("Password required for restore")
 
         # Find the most recent snapshot
-        results = search(
+        results = _client.search(
             self.api_key,
             chunk_type="knowledge_graph_snapshot",
             limit=1,
@@ -512,7 +485,7 @@ class EnyalAgent:
                 })
                 break
 
-            remote = get_knowledge_nodes(
+            remote = _client.get_knowledge_nodes(
                 self.api_key,
                 since=since,
                 limit=limit,

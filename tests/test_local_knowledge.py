@@ -28,15 +28,11 @@ Run: python3 test_local_knowledge.py
 import json
 import os
 import sqlite3
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from local_knowledge import LocalKnowledgeGraph
-from enyal_agent import EnyalAgent
+from enyal_sdk import LocalKnowledgeGraph, EnyalAgent
 
 
 class TestLocalKnowledgeGraph(unittest.TestCase):
@@ -161,7 +157,7 @@ class TestEnyalAgent(unittest.TestCase):
         os.rmdir(self.tmpdir)
 
     # T8. archive() sends to ENYAL AND stores locally (mocked)
-    @patch("enyal_agent.archive")
+    @patch("enyal_sdk.client.archive")
     def test_t8_archive_stores_locally(self, mock_archive):
         mock_archive.return_value = {"chunk_id": "abc123", "status": "archived"}
 
@@ -178,7 +174,7 @@ class TestEnyalAgent(unittest.TestCase):
         self.assertTrue(len(local) > 0)
 
     # T10. sync_to_enyal() archives local snapshot (mocked)
-    @patch("enyal_agent.archive")
+    @patch("enyal_sdk.client.archive")
     def test_t10_sync_to_enyal(self, mock_archive):
         mock_archive.return_value = {"chunk_id": "sync123"}
 
@@ -196,7 +192,7 @@ class TestEnyalAgent(unittest.TestCase):
         self.assertNotIn(b"name_hash", raw)
 
     # T11. sync_from_enyal pulls remote nodes locally (mocked)
-    @patch("enyal_agent.get_knowledge_nodes")
+    @patch("enyal_sdk.client.get_knowledge_nodes")
     def test_t11_sync_from_enyal(self, mock_nodes):
         mock_nodes.return_value = [
             {"name": "RemoteEntity", "node_type": "entity",
@@ -264,7 +260,7 @@ class TestEnyalAgent(unittest.TestCase):
         self.assertEqual(len(sp), 1)
 
     # T15. forget doesn't affect ENYAL archives
-    @patch("enyal_agent.archive")
+    @patch("enyal_sdk.client.archive")
     def test_t15_forget_doesnt_affect_enyal(self, mock_archive):
         mock_archive.return_value = {"chunk_id": "perm123"}
 
@@ -288,7 +284,7 @@ class TestEnyalAgent(unittest.TestCase):
         mock_archive.assert_called_once()
 
     # T16. sync_from_enyal with since parameter
-    @patch("enyal_agent.get_knowledge_nodes")
+    @patch("enyal_sdk.client.get_knowledge_nodes")
     def test_t16_sync_with_since(self, mock_nodes):
         mock_nodes.return_value = [
             {"name": "NewEntity", "node_type": "entity",
@@ -303,7 +299,7 @@ class TestEnyalAgent(unittest.TestCase):
         self.assertEqual(call_kwargs.get("since"), "2026-04-07T00:00:00")
 
     # T17. sync_from_enyal pagination — 200 nodes in 2 pages of 100
-    @patch("enyal_agent.get_knowledge_nodes")
+    @patch("enyal_sdk.client.get_knowledge_nodes")
     def test_t17_sync_pagination(self, mock_nodes):
         page1 = [{"name": f"Entity_{i}", "node_type": "entity",
                    "summary": f"Node {i}", "properties": "{}",
@@ -321,7 +317,7 @@ class TestEnyalAgent(unittest.TestCase):
         self.assertEqual(mock_nodes.call_count, 3)
 
     # T18. Modify local node, sync — conflict logged, remote wins
-    @patch("enyal_agent.get_knowledge_nodes")
+    @patch("enyal_sdk.client.get_knowledge_nodes")
     def test_t18_conflict_remote_wins(self, mock_nodes):
         # Create a local node and fake a previous sync
         self.agent.remember("Tesla", "entity", "Local version",
@@ -356,7 +352,7 @@ class TestEnyalAgent(unittest.TestCase):
         self.assertEqual(len(nodes), 1)
 
     # T19. strategy="local_wins" — local modification preserved
-    @patch("enyal_agent.get_knowledge_nodes")
+    @patch("enyal_sdk.client.get_knowledge_nodes")
     def test_t19_conflict_local_wins(self, mock_nodes):
         self.agent.remember("Tesla", "entity", "Local version",
                             {"source": "local"})
@@ -386,7 +382,7 @@ class TestEnyalAgent(unittest.TestCase):
         self.assertEqual(nodes[0]["summary"], "Modified locally")
 
     # T20. sync returns {"synced": N, "conflicts": M}
-    @patch("enyal_agent.get_knowledge_nodes")
+    @patch("enyal_sdk.client.get_knowledge_nodes")
     def test_t20_sync_return_format(self, mock_nodes):
         mock_nodes.return_value = [
             {"name": f"Entity_{i}", "node_type": "entity",

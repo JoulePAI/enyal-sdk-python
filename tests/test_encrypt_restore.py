@@ -30,15 +30,11 @@ import base64
 import hashlib
 import json
 import os
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from local_knowledge import LocalKnowledgeGraph
-from enyal_agent import EnyalAgent
+from enyal_sdk import LocalKnowledgeGraph, EnyalAgent
 
 
 def make_agent(db_path=None):
@@ -83,7 +79,7 @@ class TestEncryptedSync(unittest.TestCase):
         self.assertEqual(h["total_edges"], 3)
 
     # T2. sync_to_enyal archives encrypted blob
-    @patch("enyal_agent.archive")
+    @patch("enyal_sdk.client.archive")
     def test_t2_sync_encrypted(self, mock_archive):
         mock_archive.return_value = {"chunk_id": "sync123"}
         result = self.agent.sync_to_enyal(password="test123")
@@ -91,7 +87,7 @@ class TestEncryptedSync(unittest.TestCase):
         mock_archive.assert_called_once()
 
     # T3. Verify chunk has encrypted_snapshot
-    @patch("enyal_agent.archive")
+    @patch("enyal_sdk.client.archive")
     def test_t3_has_encrypted_field(self, mock_archive):
         mock_archive.return_value = {"chunk_id": "sync123"}
         self.agent.sync_to_enyal(password="test123")
@@ -104,7 +100,7 @@ class TestEncryptedSync(unittest.TestCase):
         self.assertEqual(data["edge_count"], 3)
 
     # T4. ENYAL cannot read node names from the chunk
-    @patch("enyal_agent.archive")
+    @patch("enyal_sdk.client.archive")
     def test_t4_names_not_readable(self, mock_archive):
         mock_archive.return_value = {"chunk_id": "sync123"}
         self.agent.sync_to_enyal(password="test123")
@@ -117,8 +113,8 @@ class TestEncryptedSync(unittest.TestCase):
         self.assertNotIn(b"NVIDIA", raw)
 
     # T5+T6. Create new agent, restore
-    @patch("enyal_agent.archive")
-    @patch("enyal_agent.search")
+    @patch("enyal_sdk.client.archive")
+    @patch("enyal_sdk.client.search")
     def test_t5_t6_restore(self, mock_search, mock_archive):
         # Sync first
         mock_archive.return_value = {"chunk_id": "sync123"}
@@ -144,8 +140,8 @@ class TestEncryptedSync(unittest.TestCase):
         os.rmdir(tmpdir2)
 
     # T7. health() matches original
-    @patch("enyal_agent.archive")
-    @patch("enyal_agent.search")
+    @patch("enyal_sdk.client.archive")
+    @patch("enyal_sdk.client.search")
     def test_t7_health_matches(self, mock_search, mock_archive):
         original_health = self.agent.health()
         mock_archive.return_value = {"chunk_id": "sync123"}
@@ -168,8 +164,8 @@ class TestEncryptedSync(unittest.TestCase):
         os.rmdir(tmpdir2)
 
     # T8. Wrong password
-    @patch("enyal_agent.archive")
-    @patch("enyal_agent.search")
+    @patch("enyal_sdk.client.archive")
+    @patch("enyal_sdk.client.search")
     def test_t8_wrong_password(self, mock_search, mock_archive):
         mock_archive.return_value = {"chunk_id": "sync123"}
         self.agent.sync_to_enyal(password="correct_pass")
@@ -190,8 +186,8 @@ class TestEncryptedSync(unittest.TestCase):
         os.rmdir(tmpdir2)
 
     # T9. compact() matches
-    @patch("enyal_agent.archive")
-    @patch("enyal_agent.search")
+    @patch("enyal_sdk.client.archive")
+    @patch("enyal_sdk.client.search")
     def test_t9_compact_matches(self, mock_search, mock_archive):
         original_compact = self.agent.compact()
         mock_archive.return_value = {"chunk_id": "sync123"}
@@ -215,7 +211,7 @@ class TestEncryptedSync(unittest.TestCase):
         os.rmdir(tmpdir2)
 
     # T13. Python encrypt produces valid format for JS
-    @patch("enyal_agent.archive")
+    @patch("enyal_sdk.client.archive")
     def test_t13_cross_platform_format(self, mock_archive):
         mock_archive.return_value = {"chunk_id": "sync123"}
         self.agent.sync_to_enyal(password="testpass123")
@@ -231,8 +227,8 @@ class TestEncryptedSync(unittest.TestCase):
         self.assertEqual(re_encoded, data["encrypted_snapshot"])
 
     # T15. Empty snapshot
-    @patch("enyal_agent.archive")
-    @patch("enyal_agent.search")
+    @patch("enyal_sdk.client.archive")
+    @patch("enyal_sdk.client.search")
     def test_t15_empty_snapshot(self, mock_search, mock_archive):
         tmpdir2 = tempfile.mkdtemp()
         db2 = os.path.join(tmpdir2, "empty.db")
@@ -260,7 +256,7 @@ class TestEncryptedSync(unittest.TestCase):
             os.rmdir(d)
 
     # T16. No snapshot on ENYAL
-    @patch("enyal_agent.search")
+    @patch("enyal_sdk.client.search")
     def test_t16_no_snapshot(self, mock_search):
         mock_search.return_value = {"chunks": []}
         with self.assertRaises(RuntimeError) as ctx:
@@ -268,7 +264,7 @@ class TestEncryptedSync(unittest.TestCase):
         self.assertIn("No knowledge graph snapshot found", str(ctx.exception))
 
     # T17. Partial failure preserves local data
-    @patch("enyal_agent.search")
+    @patch("enyal_sdk.client.search")
     def test_t17_failed_restore_preserves(self, mock_search):
         # Agent has 5 nodes
         self.assertEqual(self.agent.health()["total_nodes"], 5)
@@ -289,8 +285,8 @@ class TestEncryptedSync(unittest.TestCase):
                          "Local data preserved after failed restore")
 
     # T18. Sync twice, restore gets latest
-    @patch("enyal_agent.archive")
-    @patch("enyal_agent.search")
+    @patch("enyal_sdk.client.archive")
+    @patch("enyal_sdk.client.search")
     def test_t18_restore_gets_latest(self, mock_search, mock_archive):
         mock_archive.return_value = {"chunk_id": "sync1"}
         self.agent.sync_to_enyal(password="test123")
@@ -318,7 +314,7 @@ class TestEncryptedSync(unittest.TestCase):
         os.rmdir(tmpdir2)
 
     # T19. Different passwords → different blobs
-    @patch("enyal_agent.archive")
+    @patch("enyal_sdk.client.archive")
     def test_t19_different_passwords(self, mock_archive):
         mock_archive.return_value = {"chunk_id": "sync1"}
         self.agent.sync_to_enyal(password="password_A")
@@ -331,7 +327,7 @@ class TestEncryptedSync(unittest.TestCase):
         self.assertNotEqual(blob_a, blob_b)
 
     # T20. Same password + same data → different ciphertext (random IV)
-    @patch("enyal_agent.archive")
+    @patch("enyal_sdk.client.archive")
     def test_t20_random_iv(self, mock_archive):
         mock_archive.return_value = {"chunk_id": "sync1"}
         self.agent.sync_to_enyal(password="same_pass")

@@ -362,7 +362,7 @@ def _is_retryable_error(exc) -> bool:
     return False
 
 
-def _get_retry_after(exc) -> float | None:
+def _get_retry_after(exc) -> Optional[float]:
     """Extract Retry-After header value from a 429 response, if present."""
     if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
         val = exc.headers.get("Retry-After") if exc.headers else None

@@ -1,35 +1,42 @@
 """
-Smoke test: verify the SDK is importable.
+Smoke test: verify the SDK is importable from an installed wheel.
 
-This catches filename mismatches (e.g., enyal-client.py vs enyal_client.py)
-that break every user's first import.
+This catches packaging bugs (missing __init__.py, wrong package structure,
+filename mismatches) that break every user's first import.
 """
 
-import os
-import sys
 import unittest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class TestImports(unittest.TestCase):
-    def test_import_enyal_client(self):
-        """enyal_client module imports without error."""
-        import enyal_client
-        self.assertTrue(hasattr(enyal_client, "archive"))
-        self.assertTrue(hasattr(enyal_client, "_api_call"))
+    def test_import_package(self):
+        """enyal_sdk package imports without error."""
+        import enyal_sdk
+        self.assertTrue(hasattr(enyal_sdk, "archive"))
+        self.assertTrue(hasattr(enyal_sdk, "__version__"))
 
-    def test_import_enyal_agent(self):
-        """enyal_agent module imports and EnyalAgent class is accessible."""
-        from enyal_agent import EnyalAgent
+    def test_import_agent(self):
+        """EnyalAgent class is accessible from package root."""
+        from enyal_sdk import EnyalAgent
         self.assertTrue(callable(EnyalAgent))
+
+    def test_import_functions(self):
+        """Client functions accessible from package root."""
+        from enyal_sdk import archive, prove, disclose, send_message
+        self.assertTrue(callable(archive))
+        self.assertTrue(callable(prove))
 
     def test_create_agent(self):
         """EnyalAgent can be instantiated with an API key."""
-        from enyal_agent import EnyalAgent
+        from enyal_sdk import EnyalAgent
         agent = EnyalAgent(api_key="test-key")
         self.assertEqual(agent.api_key, "test-key")
         self.assertEqual(agent.base_url, "https://api.enyal.ai")
+
+    def test_version(self):
+        """__version__ is set and matches pyproject.toml."""
+        import enyal_sdk
+        self.assertEqual(enyal_sdk.__version__, "2.1.0")
 
 
 if __name__ == "__main__":
