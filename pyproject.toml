@@ -6,12 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "enyal-sdk"
 version = "2.1.0"
 description = "ENYAL SDK — encrypted knowledge graph, local memory, permanent proof"
-license = "Apache-2.0"
+license = {text = "Apache-2.0"}
 requires-python = ">=3.9"
 authors = [{name = "Greenland AI Limited", email = "info@enyal.ai"}]
 readme = "README.md"
 keywords = ["enyal", "knowledge-graph", "zero-knowledge", "archival", "sdk"]
 classifiers = [
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
